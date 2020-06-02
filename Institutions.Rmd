@@ -1,0 +1,235 @@
+---
+title: "Institutions, Reforms and Economic Growth"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, error = FALSE, message = FALSE, warning = FALSE)
+```
+
+## Data cleaning and preparation
+
+This was quite the learning experience. I chose to only work with the new EU member state data.
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(stringr)
+library(dplyr)
+library(plm)
+library(modelr)
+library(corrplot)
+library(stargazer)
+library(gplots)
+library(sjPlot)
+
+url1 <- "https://github.com/klimaviu/Institutions-and-Growth/raw/master/Reforms_database_Project_2020.xlsx"
+destfile1 <- "Reforms_database_Project_2020.xlsx"
+curl::curl_download(url1, destfile1)
+
+Reforms <- read_excel(destfile1,
+                      skip = 1,
+                      col_types = c(rep("text",2), rep("numeric", 81)))[2:716,] %>% 
+  rename(New_old = `New/old`)
+
+Reforms <- Reforms %>% mutate(
+  EU =  factor(EU, levels = c("0", "1")),
+  gov_party = factor(gov_party, levels = c("1", "2", "3", "4", "5"))
+)
+
+url2 <- "https://github.com/klimaviu/Institutions-and-Growth/raw/master/heritage-economic-freedom.xlsx"
+destfile2 <- "heritage_economic_freedom.xlsx"
+curl::curl_download(url2, destfile2)
+
+heritage <- read_excel(destfile2,
+                       col_types = c("text", rep("numeric", 14))) %>% 
+  filter(Name %in% c(Reforms$Country)) %>% 
+  rename(Year = "Index Year",
+         Country = "Name",
+         Overall_score = "Overall Score",
+         Property_rights = "Property Rights",
+         Judicial_effectiveness = "Judicial Effectiveness",
+         Gov_integrity = "Government Integrity",
+         Tax_burden = "Tax Burden",
+         Gov_spending = "Government Spending",
+         Fiscal_health = "Fiscal Health",
+         Business_freedom = "Business Freedom",
+         Labor_freedom = "Labor Freedom",
+         Monetary_freedom = "Monetary Freedom",
+         Trade_freedom = "Trade Freedom",
+         Investment_freedom = "Investment Freedom",
+         Financial_freedom = "Financial Freedom")
+
+non_EU_countries <- c("United States", "Norway", "Switzerland", "Iceland", "Canada", "Japan", "Australia", "New Zealand", "Korea")         
+
+'%!in%' <- function(x,y)!('%in%'(x,y))
+
+Updated <- full_join(Reforms, heritage, by = c("Year", "Country")) %>% 
+  filter(Year >=1996, Year <=2015) %>% 
+  filter(Country %!in% non_EU_countries) %>% 
+  select(New_old, Country, Year, GDP, GDP_per_capita, GDP_growth,
+         trade_openness, capital_openness, Overall_score, Property_rights,
+         Gov_integrity, Tax_burden, Gov_spending, Business_freedom, Labor_freedom,
+         Monetary_freedom, Trade_freedom, Investment_freedom, Financial_freedom,
+         lmr_fraser, GG_debt, EU, gov_party, gov_type, gov_new) %>% 
+  mutate(
+    Monetary_reform = c(rep(NA,3),ifelse((diff(Monetary_freedom,3))>0,1,0)), #New variables for reforms
+    Spending_reform = c(rep(NA,3),ifelse((diff(Gov_spending,3))>0,1,0)),
+    Tax_reform = c(rep(NA,3),ifelse((diff(Tax_burden,3))<0,1,0)),
+    Financial_reform = c(rep(NA,3),ifelse((diff(Financial_freedom,3))>0,1,0)),
+    Trade_reform = c(rep(NA,3),ifelse((diff(trade_openness,3))>0,1,0)),
+    Capital_reform = c(rep(NA,3),ifelse((diff(capital_openness,3))>0,1,0)),
+    Investment_reform = c(rep(NA,3),ifelse((diff(Investment_freedom,3))>0,1,0)),
+    Overall_reform = c(rep(NA,3),ifelse((diff(Overall_score,3))>0,1,0)),
+    lMon_ref = lag(Monetary_reform, 1), #Lagged reforms for the compution of correlations
+    lSp_ref = lag(Spending_reform, 1),
+    lTax_ref = lag(Tax_reform,1),
+    lFin_ref = lag(Financial_reform, 1),
+    lTr_ref = lag(Trade_reform,1),
+    lCap_ref = lag(Capital_reform, 1),
+    Crisis = factor(ifelse(Year %in% c(2008, 2009), 1, 0)) #Banking crisis dummy
+  ) %>% 
+  filter(Year >=1999, Year <=2015)
+
+NMS <- Updated %>% filter(New_old == "NMS")
+```
+
+## Figure 1: Trade per capita and GDP per capita
+
+```{r}
+NMS %>% 
+  mutate(
+    population = GDP/GDP_per_capita,
+    trade_per_capita = (trade_openness*GDP)/population
+  ) %>% 
+  ggplot()+
+  geom_line(aes(Year, GDP_per_capita, color = Country))+
+  geom_line(aes(Year, trade_per_capita))+
+  facet_wrap(~Country, nrow = 2)+
+  ylab("GDP per capita, Trade per capita")
+```
+
+## Figure 2: Heterogeneity accross countries
+
+```{r}
+plotmeans(GDP_growth ~ Country, main = "Heterogeneity across countries", data = NMS)
+```
+
+## Figure 3: Heterogeneity accross years
+
+```{r}
+plotmeans(GDP_growth ~ Year, main = "Heterogeneity across years", data = NMS)
+```
+
+## Figure 4: A correlations graph
+
+```{r}
+NMS_cor6 <- NMS %>%
+  select(GDP_growth, Monetary_reform,Financial_reform, 
+         Trade_reform, Gov_integrity, trade_openness)
+
+corrplot(cor(NMS_cor6), type = "upper", order = "hclust")
+
+final_correlations <- cor(NMS_cor6)
+```
+
+# *Fixed effects regressions*
+
+## Looking at trade openness
+
+```{r}
+fixed <- plm(GDP_growth ~ trade_openness + Crisis,
+             data=NMS,
+             index=c("Country", "Year"),
+             model = "within")
+summary(fixed, se = vcovHC(fixed))
+
+fixed2 <- plm(GDP_growth ~ trade_openness + factor(gov_party) + Gov_integrity + Crisis,
+             data=NMS,
+             index=c("Country", "Year"),
+             model = "within")
+summary(fixed2, se = vcovHC(fixed2))
+
+```
+
+
+## Looking at reforms:
+
+```{r}
+fixed_reform <- plm(GDP_growth ~ Trade_reform + Crisis,
+                    data=NMS,
+                    index=c("Country", "Year"), 
+                    model = "within")
+summary(fixed_reform, se = vcovHC(fixed_reform))
+```
+
+## Introducing more reform variables
+
+```{r}
+fixed_reform2 <- plm(GDP_growth ~ Trade_reform + Financial_reform + Monetary_reform + Crisis,
+                     data=NMS,
+                     index=c("Country", "Year"), 
+                     model = "within")
+summary(fixed_reform2, se = vcovHC(fixed_reform2))
+```
+
+
+## Introducing gov_type and Gov_integirty as a control variable
+
+```{r}
+fixed_reform3 <- plm(GDP_growth ~ Trade_reform + Financial_reform + Monetary_reform + Crisis + factor(gov_party) + Gov_integrity,
+                     data=NMS,
+                     index=c("Country", "Year"), 
+                     model = "within")
+summary(fixed_reform3, se = vcovHC(fixed_reform3))
+```
+
+## Lagging reforms:
+
+```{r}
+fixed_reform4 <- plm(GDP_growth ~ lag(Trade_reform) + lag(Financial_reform) + lag(Monetary_reform) + Crisis + factor(gov_party) + Gov_integrity,
+                     data=NMS,
+                     index=c("Country", "Year"), 
+                     model = "within")
+summary(fixed_reform4, se = vcovHC(fixed_reform4))
+```
+
+## Lagging one reform variable:
+
+```{r}
+fixed_reform5 <- plm(GDP_growth ~ Trade_reform + lag(Financial_reform) + Monetary_reform + Crisis + factor(gov_party) + Gov_integrity,
+                     data=NMS,
+                     index=c("Country", "Year"), 
+                     model = "within")
+summary(fixed_reform5, se = vcovHC(fixed_reform5))
+```
+
+## Generating heteroskedasticity robust SEs and the table
+
+```{r}
+rob_se1 <- list(sqrt(diag(vcovHC(fixed))),
+               sqrt(diag(vcovHC(fixed_reform))),
+               sqrt(diag(vcovHC(fixed_reform2))))
+
+rob_se2 <- list(sqrt(diag(vcovHC(fixed_reform3))),
+               sqrt(diag(vcovHC(fixed_reform4))),
+               sqrt(diag(vcovHC(fixed_reform5))))
+
+table1 <- stargazer(fixed, fixed_reform, fixed_reform2, 
+                   digits = 3,
+                   header = FALSE,
+                   type = "text", 
+                   se = rob_se1,
+                   title = "Linear Panel Regression Models of the Impact of Institutions and Reforms on Economic Growth",
+                   model.numbers = FALSE,
+                   column.labels = c("(1)", "(2)", "(3)"))
+
+table2 <- stargazer(fixed_reform3, fixed_reform4, fixed_reform5, 
+                    digits = 3,
+                    header = FALSE,
+                    type = "text", 
+                    se = rob_se2,
+                    title = "Linear Panel Regression Models of the Impact of Institutions and Reforms on Economic Growth",
+                    model.numbers = FALSE,
+                    column.labels = c( "(4)", "(5)", "(6)"))
+```
